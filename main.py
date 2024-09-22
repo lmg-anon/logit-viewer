@@ -19,6 +19,7 @@ model = None
 cache = None
 tokenizer = None
 backend = "exllamav2"  # Default backend
+max_context = 1024
 
 tk_root = None
 tk_queue = queue.Queue()
@@ -46,8 +47,8 @@ tk_thread = threading.Thread(target=tk_thread_func)
 tk_thread.daemon = True
 tk_thread.start()
 
-def load_model(model_path):
-    global model, cache, tokenizer, backend
+def unload_model():
+    global model, cache, tokenizer
     if hasattr(model, "unload"):
         model.unload()
     del model
@@ -58,9 +59,13 @@ def load_model(model_path):
     tokenizer = None
     __import__("gc").collect()
     torch.cuda.empty_cache()
+    return "Not loaded."
+
+def load_model(model_path):
+    global model, cache, tokenizer, backend
+    unload_model()
 
     max_batch_size = 1
-    max_context = 1024
 
     if backend == "exllamav2":
         # Load model
@@ -195,7 +200,7 @@ def select_model():
         return None
     
     load_model(model_path)
-    return f"Model loaded from: {model_path}"
+    return f"Model loaded from: {model_path}\n- n_ctx: {max_context}"
 
 def analyze_text(text):
     if model is None:
@@ -209,11 +214,22 @@ def analyze_text(text):
 with gr.Blocks(css="#output-text { overflow-y: auto !important; white-space: pre-wrap; }", analytics_enabled=False) as demo:
     gr.Markdown("# Token Perplexity Visualizer")
 
-    with gr.Row():
+    with gr.Row():  # Create a row for splitting the input and output areas
         with gr.Column(scale=1):  # Left side (input section)
-            backend_dropdown = gr.Dropdown(["exllamav2", "llama-cpp-python"], label="Select Backend", value="exllamav2")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    backend_dropdown = gr.Dropdown(["exllamav2", "llama-cpp-python"], label="Select Backend", value="exllamav2")
+                with gr.Column(scale=1):
+                    ctx_number = gr.Number(label="Context Size", value=1024)
+            
             model_output = gr.Textbox(label="Model Status", value="Not loaded.")
-            model_button = gr.Button("Select Model")
+            
+            with gr.Row():
+                with gr.Column(scale=1):
+                    load_model_button = gr.Button("Select Model")
+                with gr.Column(scale=1):
+                    unload_model_button = gr.Button("Unload Model")
+            
             input_text = gr.Textbox(label="Input Text", placeholder="Enter text here...", lines=10)
             analyze_button = gr.Button("Analyze")
         
@@ -221,9 +237,15 @@ with gr.Blocks(css="#output-text { overflow-y: auto !important; white-space: pre
             gr.Markdown("### Output")
             output_box = gr.HTML(elem_id="output-text")
 
-    model_button.click(fn=select_model, outputs=model_output)
+    # Model selection logic
+    load_model_button.click(fn=select_model, outputs=model_output)
+    unload_model_button.click(fn=unload_model, outputs=model_output)
+    
+    # Text analysis logic
     analyze_button.click(fn=analyze_text, inputs=input_text, outputs=output_box)
+
     backend_dropdown.change(lambda choice: setattr(sys.modules[__name__], 'backend', choice), inputs=backend_dropdown)
+    ctx_number.change(lambda choice: setattr(sys.modules[__name__], 'max_context', choice), inputs=ctx_number)
 
 # Launch the Gradio app
 demo.launch()
