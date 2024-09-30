@@ -236,7 +236,7 @@ def compare_models(text: str):
     return result1, result2
 
 # Gradio Interface
-with gr.Blocks(css=".output-text { overflow-y: auto !important; white-space: pre-wrap; } .token:hover { background-color: gray; }", analytics_enabled=False) as demo:
+with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-space: pre-wrap; max-height: 80vh; } .token:hover { background-color: gray; }", analytics_enabled=False) as demo:
     gr.Markdown("# Token Perplexity Visualizer")
 
     with gr.Tabs():
