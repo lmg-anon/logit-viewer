@@ -175,7 +175,7 @@ def visualize_tokens_with_color(model: LLMModel, text: str, token_info: list[tup
         
         tooltip = f"Top {topk} probabilities:\n" + "\n".join([f"{replaceUnprintable(t)}: {p:.4f}" for t, p in top])
 
-        colored_tokens.append(f'<span style="color:{color}" title="{html.escape(tooltip)}">{html.escape(token)}</span>')
+        colored_tokens.append(f'<span class="token" style="color:{color}" title="{html.escape(tooltip)}">{html.escape(token)}</span>')
     
     return ''.join(colored_tokens)
 
@@ -236,7 +236,7 @@ def compare_models(text: str):
     return result1, result2
 
 # Gradio Interface
-with gr.Blocks(css=".output-text { overflow-y: auto !important; white-space: pre-wrap; }", analytics_enabled=False) as demo:
+with gr.Blocks(css=".output-text { overflow-y: auto !important; white-space: pre-wrap; } .token:hover { background-color: gray; }", analytics_enabled=False) as demo:
     gr.Markdown("# Token Perplexity Visualizer")
 
     with gr.Tabs():
