@@ -25,6 +25,9 @@ class LLMModel:
     backend: str = "exllamav2"
     max_context: int = 1024
 
+    def __hash__(self):
+        return hash((self.model_path, self.backend, self.max_context))
+
     def unload_model(self):
         if hasattr(self.model, "unload"):
             self.model.unload()
