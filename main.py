@@ -152,7 +152,8 @@ tk_thread = threading.Thread(target=tk_thread_func)
 tk_thread.daemon = True
 tk_thread.start()
 
-def visualize_tokens_with_color(model: LLMModel, text: str, token_info: list[tuple]):
+def get_tokens_with_color(model: LLMModel, text: str):
+    token_info = model.get_token_perplexities(text, topk)
     tokens = model.decode_tokens(model.tokenize(text)[0][:model.max_context], True)[1:]
     
     colored_tokens = []
@@ -175,9 +176,9 @@ def visualize_tokens_with_color(model: LLMModel, text: str, token_info: list[tup
         
         tooltip = f"Top {topk} probabilities:\n" + "\n".join([f"{replaceUnprintable(t)}: {p:.4f}" for t, p in top])
 
-        colored_tokens.append(f'<span class="token" style="color:{color}" title="{html.escape(tooltip)}">{html.escape(token)}</span>')
+        colored_tokens.append((token, color, tooltip))
     
-    return ''.join(colored_tokens)
+    return colored_tokens
 
 def select_model(idx: int, backend: str, max_context: int, lazy_load: bool):
     model_path = None
@@ -217,23 +218,43 @@ def analyze_text(idx: int, text: str):
     if model is None:
         return "Please load a model first."
     
-    token_info = model.get_token_perplexities(text, topk)
-    colored_text = visualize_tokens_with_color(model, text, token_info)
-    return colored_text
+    result = get_tokens_with_color(model, text)
+    return ''.join([f'<span class="token" style="color:{color}" title="{html.escape(tooltip)}">{html.escape(token)}</span>' for token, color, tooltip in result])
 
 def compare_models(text: str):
     if not models[0].model_path or not models[1].model_path:
         return "Please select both models first."
     
     models[0].load_model()
-    result1 = analyze_text(0, text)
+    result1 = get_tokens_with_color(models[0], text)
     models[0].unload_model()
     
     models[1].load_model()
-    result2 = analyze_text(1, text)
+    result2 = get_tokens_with_color(models[1], text)
     models[1].unload_model()
 
-    return result1, result2
+    # Generate HTML for Model 1 and Model 2
+    html1 = ''.join([f'<span class="token" style="color:{color}" title="{html.escape(tooltip)}">{html.escape(token)}</span>' for token, color, tooltip in result1])
+    html2 = ''.join([f'<span class="token" style="color:{color}" title="{html.escape(tooltip)}">{html.escape(token)}</span>' for token, color, tooltip in result2])
+
+    if [t for t, _, _ in result1][-10:] != [t for t, _, _ in result2][-10:]:
+        diff_html = ["Tokenizer mismatch, diff not available."]
+    else:
+        # Generate HTML for Diff
+        diff_html = []
+        for (token1, color1, _), (_, color2, _) in zip(result1, result2):
+            if (color1 in ["red", "orange", "yellow"] and color2 in ["green"]):
+                diff_color = "green"
+            elif color1 in ["red"] and color2 in ["orange", "yellow"]:
+                diff_color = "orange"
+            elif color1 in ["green"] and color2 in ["red", "orange", "yellow"]:
+                diff_color = "red"
+            else:
+                diff_color = "white"
+            
+            diff_html.append(f'<span class="token" style="color:{diff_color}">{html.escape(token1)}</span>')
+
+    return html1, html2, ''.join(diff_html)
 
 # Gradio Interface
 with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-space: pre-wrap; max-height: 80vh; } .token:hover { background-color: gray; }", analytics_enabled=False) as demo:
@@ -306,6 +327,8 @@ with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-spac
                             model1_output = gr.HTML(elem_classes="output-text")
                         with gr.TabItem("Model 2 Output"):
                             model2_output = gr.HTML(elem_classes="output-text")
+                        with gr.TabItem("Diff"):
+                            output_box_diff = gr.HTML(elem_classes="output-text")
 
             # Model 1 selection logic
             load_model_button1.click(fn=lambda _1, _2: select_model(0, _1, _2, True), inputs=[backend_dropdown1, ctx_number1], outputs=model_output1)
@@ -313,7 +336,7 @@ with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-spac
             # Model 2 selection logic
             load_model_button2.click(fn=lambda _1, _2: select_model(1, _1, _2, True), inputs=[backend_dropdown2, ctx_number2], outputs=model_output2)
 
-            compare_button.click(fn=compare_models, inputs=compare_input_text, outputs=[model1_output, model2_output])
+            compare_button.click(fn=compare_models, inputs=compare_input_text, outputs=[model1_output, model2_output, output_box_diff])
 
 # Launch the Gradio app
 demo.launch()
