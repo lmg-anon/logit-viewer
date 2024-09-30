@@ -237,7 +237,7 @@ def compare_models(text: str):
     html1 = ''.join([f'<span class="token" style="color:{color}" title="{html.escape(tooltip)}">{html.escape(token)}</span>' for token, color, tooltip in result1])
     html2 = ''.join([f'<span class="token" style="color:{color}" title="{html.escape(tooltip)}">{html.escape(token)}</span>' for token, color, tooltip in result2])
 
-    if [t for t, _, _ in result1][-10:] != [t for t, _, _ in result2][-10:]:
+    if len(result1) != len(result2) or [t for t, _, _ in result1][-10:] != [t for t, _, _ in result2][-10:]:
         diff_html = ["Tokenizer mismatch, diff not available."]
     else:
         # Generate HTML for Diff
