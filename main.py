@@ -5,7 +5,10 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from exllamav2 import ExLlamaV2, ExLlamaV2Config, ExLlamaV2Cache, ExLlamaV2Tokenizer
-from llama_cpp import Llama
+try:
+    from llama_cpp_cuda_tensorcores import Llama
+except:
+    from llama_cpp import Llama
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tkinter import filedialog, Tk
 import gradio as gr
@@ -25,7 +28,8 @@ class LLMModel:
     model_path: str = None
     backend: str = "transformers"
     max_context: int = 1024
-    quant: str | None = None
+    gpu_layers: int | None = 0 # llama-cpp-python
+    quant: str | None = None # transformers
     bos_token_id: int = -1
 
     def __hash__(self):
@@ -66,7 +70,7 @@ class LLMModel:
             self.tokenizer = ExLlamaV2Tokenizer(config)
             self.bos_token_id = self.tokenizer.bos_token_id
         elif self.backend == "llama-cpp-python":
-            self.model = Llama(model_path=self.model_path, n_ctx=self.max_context, use_mmap=False, logits_all=True, verbose=False)
+            self.model = Llama(model_path=self.model_path, n_gpu_layers=self.gpu_layers, n_ctx=self.max_context, use_mmap=False, logits_all=True, verbose=False)
             self.bos_token_id = self.model.token_bos()
         elif self.backend == "transformers":
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
@@ -228,7 +232,7 @@ def get_tokens_with_color(model: LLMModel, text: str):
     
     return colored_tokens
 
-def select_model(idx: int, backend: str, max_context: int, quant: str, lazy_load: bool):
+def select_model(idx: int, backend: str, max_context: int, gpu_layers: int, quant: str, lazy_load: bool):
     model_path = None
     
     def file_picker():
@@ -247,16 +251,20 @@ def select_model(idx: int, backend: str, max_context: int, quant: str, lazy_load
     
     if backend != "transformers":
         quant = None
+
+    if backend != "llama-cpp-python":
+        gpu_layers = None
     
     model = models[idx]
     model.model_path = model_path
     model.backend = backend
     model.max_context = max_context
+    model.gpu_layers = gpu_layers
     model.quant = quant
     if not lazy_load:
         model.load_model()
     
-    return f"Model {'loaded' if not lazy_load else 'selected'} from: {model_path}\n- Context Lenght: {max_context}" + (f"\n- Quant: {quant}" if quant else "")
+    return f"Model {'loaded' if not lazy_load else 'selected'} from: {model_path}\n- Context Size: {max_context}" + (f"\n- Quant: {quant}" if quant else "") + (f"\n- GPU Layers: {gpu_layers}" if gpu_layers else "")
 
 def unload_model(idx):
     model = models[idx]
@@ -320,13 +328,13 @@ with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-spac
                         with gr.Column(scale=1):
                             backend_dropdown = gr.Dropdown(["transformers", "exllamav2", "llama-cpp-python"], label="Backend", value=models[0].backend)
                             ctx_number = gr.Number(label="Context Size", value=models[0].max_context)
+                            gpu_layers = gr.Number(label="GPU Layers", value=models[0].gpu_layers, visible=(models[0].backend == "llama-cpp-python"))
                             backend_quant_radio = gr.Radio(["None", "8bit", "4bit"], label="Quantization", value="None", visible=(models[0].backend == "transformers"))
                             
-                            def update_visibility(dropdown):
-                                value = dropdown
-                                return gr.Radio(visible=(value == "transformers"))
+                            def update_visibility(dropdown_value):
+                                return gr.Number(visible=(dropdown_value == "llama-cpp-python")), gr.Radio(visible=(dropdown_value == "transformers"))
 
-                            backend_dropdown.change(update_visibility, backend_dropdown, backend_quant_radio)
+                            backend_dropdown.change(update_visibility, backend_dropdown, [gpu_layers, backend_quant_radio])
                     
                     model_output = gr.Textbox(label="Model Status", value="Not loaded.")
                     
@@ -344,7 +352,7 @@ with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-spac
                     output_box = gr.HTML(elem_classes="output-text")
 
             # Model selection logic
-            load_model_button.click(fn=lambda _1, _2, _3: select_model(0, _1, _2, _3, False), inputs=[backend_dropdown, ctx_number, backend_quant_radio], outputs=model_output)
+            load_model_button.click(fn=lambda _1, _2, _3, _4: select_model(0, _1, _2, _3, _4, False), inputs=[backend_dropdown, ctx_number, gpu_layers, backend_quant_radio], outputs=model_output)
             unload_model_button.click(fn=lambda: unload_model(0), outputs=model_output)
             
             # Text analysis logic
@@ -359,13 +367,13 @@ with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-spac
                                 with gr.Column(scale=1):
                                     backend_dropdown1 = gr.Dropdown(["transformers", "exllamav2", "llama-cpp-python"], label="Model 1 Backend", value=models[0].backend)
                                     ctx_number1 = gr.Number(label="Model 1 Context Size", value=models[0].max_context)
+                                    gpu_layers1 = gr.Number(label="GPU Layers", value=models[0].gpu_layers, visible=(models[0].backend == "llama-cpp-python"))
                                     backend_quant_radio1 = gr.Radio(["None", "8bit", "4bit"], label="Quantization", value="None", visible=(models[0].backend == "transformers"))
                         
-                                def update_visibility(dropdown):
-                                    value = dropdown
-                                    return gr.Radio(visible=(value == "transformers"))
+                                def update_visibility(dropdown_value):
+                                    return gr.Number(visible=(dropdown_value == "llama-cpp-python")), gr.Radio(visible=(dropdown_value == "transformers"))
 
-                                backend_dropdown1.change(update_visibility, backend_dropdown1, backend_quant_radio1)
+                                backend_dropdown1.change(update_visibility, backend_dropdown1, [gpu_layers1, backend_quant_radio1])
                             
                             model_output1 = gr.Textbox(label="Model 1 Status", value="Not loaded.")
                             
@@ -376,13 +384,13 @@ with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-spac
                                 with gr.Column(scale=1):
                                     backend_dropdown2 = gr.Dropdown(["transformers", "exllamav2", "llama-cpp-python"], label="Model 2 Backend", value=models[1].backend)
                                     ctx_number2 = gr.Number(label="Model 2 Context Size", value=models[1].max_context)
+                                    gpu_layers2 = gr.Number(label="GPU Layers", value=models[1].gpu_layers, visible=(models[1].backend == "llama-cpp-python"))
                                     backend_quant_radio2 = gr.Radio(["None", "8bit", "4bit"], label="Quantization", value="None", visible=(models[1].backend == "transformers"))
                         
-                                def update_visibility(dropdown):
-                                    value = dropdown
-                                    return gr.Radio(visible=(value == "transformers"))
+                                def update_visibility(dropdown_value):
+                                    return gr.Number(visible=(dropdown_value == "llama-cpp-python")), gr.Radio(visible=(dropdown_value == "transformers"))
 
-                                backend_dropdown2.change(update_visibility, backend_dropdown2, backend_quant_radio2)
+                                backend_dropdown2.change(update_visibility, backend_dropdown2, [gpu_layers2, backend_quant_radio2])
                             
                             model_output2 = gr.Textbox(label="Model 2 Status", value="Not loaded.")
                             
@@ -401,10 +409,10 @@ with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-spac
                             output_box_diff = gr.HTML(elem_classes="output-text")
 
             # Model 1 selection logic
-            load_model_button1.click(fn=lambda _1, _2, _3: select_model(0, _1, _2, _3, True), inputs=[backend_dropdown1, ctx_number1, backend_quant_radio1], outputs=model_output1)
+            load_model_button1.click(fn=lambda _1, _2, _3, _4: select_model(0, _1, _2, _3, _4, True), inputs=[backend_dropdown1, ctx_number1, gpu_layers1, backend_quant_radio1], outputs=model_output1)
 
             # Model 2 selection logic
-            load_model_button2.click(fn=lambda _1, _2, _3: select_model(1, _1, _2, _3, True), inputs=[backend_dropdown2, ctx_number2, backend_quant_radio2], outputs=model_output2)
+            load_model_button2.click(fn=lambda _1, _2, _3, _4: select_model(1, _1, _2, _3, _4, True), inputs=[backend_dropdown2, ctx_number2, gpu_layers2, backend_quant_radio2], outputs=model_output2)
 
             compare_button.click(fn=compare_models, inputs=compare_input_text, outputs=[model1_output, model2_output, output_box_diff])
 
