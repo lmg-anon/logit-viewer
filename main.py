@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from exllamav2 import ExLlamaV2, ExLlamaV2Config, ExLlamaV2Cache, ExLlamaV2Tokenizer
 from llama_cpp import Llama
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from tkinter import filedialog, Tk
 import gradio as gr
 from functools import lru_cache
@@ -22,11 +23,13 @@ class LLMModel:
     cache: Any = None
     tokenizer: Any = None
     model_path: str = None
-    backend: str = "exllamav2"
+    backend: str = "transformers"
     max_context: int = 1024
+    quant: str | None = None
+    bos_token_id: int = -1
 
     def __hash__(self):
-        return hash((self.model_path, self.backend, self.max_context))
+        return hash((self.model_path, self.backend))
 
     def unload_model(self):
         if hasattr(self.model, "unload"):
@@ -61,24 +64,61 @@ class LLMModel:
             self.cache = ExLlamaV2Cache(self.model, lazy=True, batch_size=max_batch_size)
             self.model.load_autosplit(self.cache)
             self.tokenizer = ExLlamaV2Tokenizer(config)
+            self.bos_token_id = self.tokenizer.bos_token_id
         elif self.backend == "llama-cpp-python":
             self.model = Llama(model_path=self.model_path, n_ctx=self.max_context, use_mmap=False, logits_all=True, verbose=False)
+            self.bos_token_id = self.model.token_bos()
+        elif self.backend == "transformers":
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+            self.bos_token_id = self.tokenizer.bos_token_id
 
-    def tokenize(self, text: str) -> list[int]:
-        if self.backend == "exllamav2":
-            return self.tokenizer.encode(text, add_bos=True)
+            kwargs = {}
+            if self.quant == "8bit":
+                kwargs = {"load_in_8bit": True}
+            elif self.quant == "4bit":
+                kwargs = {"load_in_4bit": True}
+
+            self.model = AutoModelForCausalLM.from_pretrained(self.model_path, device_map="auto", **kwargs)
+            self.model.eval()
+
+        if self.bos_token_id is None:
+            token = self.tokenize("\u25CF", add_bos=False)[0]
+            assert len(token) == 1, token
+            self.bos_token_id = token[0]
+
+    def tokenize(self, text: str, add_bos=True) -> list[int]:
+        # For now, it's required that some BOS token is always present in the output of this function when add_bos is True.
+        # This may not be optimal as some models don't need the BOS to be present.
+        if self.backend == "transformers":
+            tokenized_text = self.tokenizer.encode(text, add_special_tokens=False, return_tensors="pt")
+            if add_bos:
+                bos_token_tensor = torch.tensor([self.bos_token_id])
+                return torch.cat((bos_token_tensor, tokenized_text.squeeze(0)), dim=0).unsqueeze(0)
+            else:
+                return tokenized_text
+        elif self.backend == "exllamav2":
+            tokenized_text = self.tokenizer.encode(text, add_bos=False)
+            if add_bos:
+                bos_token_tensor = torch.tensor([self.bos_token_id])
+                return torch.cat((bos_token_tensor, tokenized_text.squeeze(0)), dim=0).unsqueeze(0)
+            else:
+                return tokenized_text
         elif self.backend == "llama-cpp-python":
-            return [self.model.tokenize(("\u25CF"+text).encode('utf-8'), add_bos=True)]
+            return [([self.bos_token_id] if add_bos else []) + self.model.tokenize(text.encode('utf-8'), add_bos=False)]
 
     @lru_cache(maxsize=None)
     def detokenize(self, ids: tuple[int, ...], heal_cp: bool = False) -> str:
-        if self.backend == "exllamav2":
+        if self.backend == "transformers":
+            return self.tokenizer.decode(torch.tensor(ids))
+        elif self.backend == "exllamav2":
             return self.tokenizer.decode(torch.tensor(ids))
         elif self.backend == "llama-cpp-python":
             return self.model.detokenize(list(ids)).decode('utf-8', errors='strict' if heal_cp else 'replace')
 
     def decode_tokens(self, ids: list[int], heal_cp: bool = False):
-        if self.backend == "exllamav2":
+        if self.backend == "transformers":
+            return [self.tokenizer.decode([id]) for id in ids]
+        elif self.backend == "exllamav2":
             id_to_piece = self.tokenizer.get_id_to_piece_list()
             return [id_to_piece[id] for id in ids]
         elif self.backend == "llama-cpp-python":
@@ -98,7 +138,12 @@ class LLMModel:
                 return output
             
     def get_token_perplexities(self, text: str, topk: int) -> list[tuple]:
-        if self.backend == "exllamav2":
+        if self.backend == "transformers":
+            tokens = self.tokenize(text)
+            tokens = tokens.squeeze(0)[:self.max_context].unsqueeze(0)
+            with torch.no_grad():
+                all_logits = self.model.forward(tokens).logits
+        elif self.backend == "exllamav2":
             tokens = self.tokenize(text)
             tokens = tokens.squeeze(0)[:self.max_context].unsqueeze(0)
             with torch.no_grad():
@@ -183,12 +228,12 @@ def get_tokens_with_color(model: LLMModel, text: str):
     
     return colored_tokens
 
-def select_model(idx: int, backend: str, max_context: int, lazy_load: bool):
+def select_model(idx: int, backend: str, max_context: int, quant: str, lazy_load: bool):
     model_path = None
     
     def file_picker():
         nonlocal model_path
-        if backend == "exllamav2":
+        if backend == "exllamav2" or backend == "transformers":
             model_path = filedialog.askdirectory(title="Select Model Folder")
         elif backend == "llama-cpp-python":
             model_path = filedialog.askopenfilename(title="Select Model File")
@@ -200,14 +245,18 @@ def select_model(idx: int, backend: str, max_context: int, lazy_load: bool):
     if not model_path:
         return None
     
+    if backend != "transformers":
+        quant = None
+    
     model = models[idx]
     model.model_path = model_path
     model.backend = backend
     model.max_context = max_context
+    model.quant = quant
     if not lazy_load:
         model.load_model()
     
-    return f"Model {'loaded' if not lazy_load else 'selected'} from: {model_path}\n- n_ctx: {max_context}"
+    return f"Model {'loaded' if not lazy_load else 'selected'} from: {model_path}\n- Context Lenght: {max_context}" + (f"\n- Quant: {quant}" if quant else "")
 
 def unload_model(idx):
     model = models[idx]
@@ -269,9 +318,15 @@ with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-spac
                 with gr.Column(scale=1):
                     with gr.Row():
                         with gr.Column(scale=1):
-                            backend_dropdown = gr.Dropdown(["exllamav2", "llama-cpp-python"], label="Select Backend", value=models[0].backend)
-                        with gr.Column(scale=1):
+                            backend_dropdown = gr.Dropdown(["transformers", "exllamav2", "llama-cpp-python"], label="Backend", value=models[0].backend)
                             ctx_number = gr.Number(label="Context Size", value=models[0].max_context)
+                            backend_quant_radio = gr.Radio(["None", "8bit", "4bit"], label="Quantization", value="None", visible=(models[0].backend == "transformers"))
+                            
+                            def update_visibility(dropdown):
+                                value = dropdown
+                                return gr.Radio(visible=(value == "transformers"))
+
+                            backend_dropdown.change(update_visibility, backend_dropdown, backend_quant_radio)
                     
                     model_output = gr.Textbox(label="Model Status", value="Not loaded.")
                     
@@ -289,11 +344,11 @@ with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-spac
                     output_box = gr.HTML(elem_classes="output-text")
 
             # Model selection logic
-            load_model_button.click(fn=lambda _1, _2: select_model(0, _1, _2, False), inputs=[backend_dropdown, ctx_number], outputs=model_output)
+            load_model_button.click(fn=lambda _1, _2, _3: select_model(0, _1, _2, _3, False), inputs=[backend_dropdown, ctx_number, backend_quant_radio], outputs=model_output)
             unload_model_button.click(fn=lambda: unload_model(0), outputs=model_output)
             
             # Text analysis logic
-            analyze_button.click(fn=lambda text: analyze_text(0, text), inputs=input_text, outputs=output_box)
+            analyze_button.click(fn=lambda _1: analyze_text(0, _1), inputs=input_text, outputs=output_box)
 
         with gr.TabItem("Model Comparison"):
             with gr.Row():
@@ -302,9 +357,15 @@ with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-spac
                         with gr.Column(scale=1):
                             with gr.Row():
                                 with gr.Column(scale=1):
-                                    backend_dropdown1 = gr.Dropdown(["exllamav2", "llama-cpp-python"], label="Model 1 Backend", value=models[0].backend)
-                                with gr.Column(scale=1):
+                                    backend_dropdown1 = gr.Dropdown(["transformers", "exllamav2", "llama-cpp-python"], label="Model 1 Backend", value=models[0].backend)
                                     ctx_number1 = gr.Number(label="Model 1 Context Size", value=models[0].max_context)
+                                    backend_quant_radio1 = gr.Radio(["None", "8bit", "4bit"], label="Quantization", value="None", visible=(models[0].backend == "transformers"))
+                        
+                                def update_visibility(dropdown):
+                                    value = dropdown
+                                    return gr.Radio(visible=(value == "transformers"))
+
+                                backend_dropdown1.change(update_visibility, backend_dropdown1, backend_quant_radio1)
                             
                             model_output1 = gr.Textbox(label="Model 1 Status", value="Not loaded.")
                             
@@ -313,9 +374,15 @@ with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-spac
                         with gr.Column(scale=1):
                             with gr.Row():
                                 with gr.Column(scale=1):
-                                    backend_dropdown2 = gr.Dropdown(["exllamav2", "llama-cpp-python"], label="Model 2 Backend", value=models[1].backend)
-                                with gr.Column(scale=1):
+                                    backend_dropdown2 = gr.Dropdown(["transformers", "exllamav2", "llama-cpp-python"], label="Model 2 Backend", value=models[1].backend)
                                     ctx_number2 = gr.Number(label="Model 2 Context Size", value=models[1].max_context)
+                                    backend_quant_radio2 = gr.Radio(["None", "8bit", "4bit"], label="Quantization", value="None", visible=(models[1].backend == "transformers"))
+                        
+                                def update_visibility(dropdown):
+                                    value = dropdown
+                                    return gr.Radio(visible=(value == "transformers"))
+
+                                backend_dropdown2.change(update_visibility, backend_dropdown2, backend_quant_radio2)
                             
                             model_output2 = gr.Textbox(label="Model 2 Status", value="Not loaded.")
                             
@@ -334,10 +401,10 @@ with gr.Blocks(css=".prose.output-text { overflow-y: auto !important; white-spac
                             output_box_diff = gr.HTML(elem_classes="output-text")
 
             # Model 1 selection logic
-            load_model_button1.click(fn=lambda _1, _2: select_model(0, _1, _2, True), inputs=[backend_dropdown1, ctx_number1], outputs=model_output1)
+            load_model_button1.click(fn=lambda _1, _2, _3: select_model(0, _1, _2, _3, True), inputs=[backend_dropdown1, ctx_number1, backend_quant_radio1], outputs=model_output1)
 
             # Model 2 selection logic
-            load_model_button2.click(fn=lambda _1, _2: select_model(1, _1, _2, True), inputs=[backend_dropdown2, ctx_number2], outputs=model_output2)
+            load_model_button2.click(fn=lambda _1, _2, _3: select_model(1, _1, _2, _3, True), inputs=[backend_dropdown2, ctx_number2, backend_quant_radio2], outputs=model_output2)
 
             compare_button.click(fn=compare_models, inputs=compare_input_text, outputs=[model1_output, model2_output, output_box_diff])
 
